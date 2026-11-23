@@ -1,42 +1,44 @@
 """
-Windows Process Bridge - servidor MCP local (stdio).
+Windows Process Bridge - local MCP server (stdio).
 
-Usado pelo mcpServers do Claude Desktop (Settings > Desenvolvedor >
-Servidores MCP locais). Roda como processo filho do proprio Claude,
-em stdio - sem rede, sem VM sandbox.
+Used by Claude Desktop's mcpServers (Settings > Developer > Local MCP
+Servers). Runs as a child process of the client itself - no network,
+no sandboxed VM (except the optional local upload server below, which
+only listens on 127.0.0.1).
 
-Ferramentas:
-  - list_processes()               -> lista todos os processos do Windows
-  - check_process(name)            -> 'running'/'closed' para um processo
-  - open_task_manager()            -> abre o Gerenciador de Tarefas na tela
-  - run_powershell(cmd)            -> cmdlet PowerShell so-leitura (allowlist)
-  - run_powershell_readonly(cmd)   -> alias do run_powershell
-  - get_process_stats(sort_by,top) -> CPU, RAM e threads por processo
-  - list_processes_grouped()       -> soma de RAM por nome de processo
-  - system_snapshot()              -> RAM, CPU e disco numa chamada
-  - gpu_status()                   -> uso de GPU/VRAM via nvidia-smi
-  - start_process(target)          -> abre um app por nome ou caminho
-  - kill_process(pid, name, confirm) -> encerra por PID ou nome
-  - list_services(name_filter)     -> servicos do Windows e estado
-  - startup_apps()                 -> o que abre junto com o Windows
-  - disk_usage(scan_path, top)     -> espaco livre por unidade + maiores pastas
-  - save_url_to_file(url, dest)    -> baixa http(s) direto pro disco, sem popup
-  - save_base64_to_file(b64, dest) -> grava base64 (de blob: extraido via JS) no disco
-  - move_file(src, dest)           -> move/renomeia (ex: Downloads -> pasta do projeto)
-  - copy_file(src, dest)           -> copia mantendo o original
-  - list_recent_downloads(min)     -> acha o que acabou de cair em Downloads
-  - ensure_dir(path)               -> cria pasta (e pais) se nao existir
-  - list_dir(path, pattern, top)   -> lista qualquer pasta, nao so Downloads
-  - delete_file(path, confirm)     -> manda pra Lixeira (reversivel), exige confirm
-  - file_info(path)                -> tamanho, datas e sha256 de um arquivo
-  - open_in_explorer(path)         -> abre o Explorer com o arquivo selecionado
-  - save_clipboard_image(dest)     -> salva imagem copiada (Ctrl+C) do clipboard
-  - get_clipboard_text()           -> le texto atual do clipboard
-  - set_clipboard_text(text)       -> escreve texto no clipboard
-  - start_upload_server(dest_dir)  -> servidor local p/ pagina enviar bytes via
-                                       fetch POST, sem passar pelo contexto do chat
-  - stop_upload_server()           -> derruba o servidor de upload
-  - upload_server_status()         -> estado e uploads recebidos nesta sessao
+Tools:
+  - list_processes()               -> lists every running Windows process
+  - check_process(name)            -> 'running'/'closed' for one process
+  - open_task_manager()            -> opens Task Manager on screen
+  - run_powershell(cmd)            -> read-only PowerShell cmdlet (allowlist)
+  - run_powershell_readonly(cmd)   -> alias of run_powershell
+  - get_process_stats(sort_by,top) -> CPU, RAM and threads per process
+  - list_processes_grouped()       -> total RAM per process name
+  - system_snapshot()              -> RAM, CPU and disk in one call
+  - gpu_status()                   -> GPU/VRAM usage via nvidia-smi
+  - start_process(target)          -> opens an app by name or path
+  - kill_process(pid, name, confirm) -> terminates by PID or name
+  - list_services(name_filter)     -> Windows services and their state
+  - startup_apps()                 -> what launches with Windows
+  - disk_usage(scan_path, top)     -> free space per drive + largest folders
+  - save_url_to_file(url, dest)    -> downloads http(s) straight to disk, no popup
+  - save_base64_to_file(b64, dest) -> writes base64 (e.g. extracted from a blob:
+                                       URL via page JS) to disk
+  - move_file(src, dest)           -> move/rename (e.g. Downloads -> project folder)
+  - copy_file(src, dest)           -> copy while keeping the original
+  - list_recent_downloads(min)     -> find what just landed in Downloads
+  - ensure_dir(path)               -> create a folder (and parents) if missing
+  - list_dir(path, pattern, top)   -> list any folder, not just Downloads
+  - delete_file(path, confirm)     -> sends to the Recycle Bin (reversible), needs confirm
+  - file_info(path)                -> size, dates and sha256 of a file
+  - open_in_explorer(path)         -> opens Explorer with the file pre-selected
+  - save_clipboard_image(dest)     -> saves an image copied (Ctrl+C) from the clipboard
+  - get_clipboard_text()           -> reads the current Windows clipboard text
+  - set_clipboard_text(text)       -> writes text to the Windows clipboard
+  - start_upload_server(dest_dir)  -> local server so a web page can send bytes via
+                                       fetch POST, without the content going through chat
+  - stop_upload_server()           -> tears down the upload server
+  - upload_server_status()         -> status and uploads received this session
 """
 import base64
 import ctypes
@@ -60,10 +62,10 @@ from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("putinha-faz-tudo")
 
-# Allowlist de cmdlets read-only para run_powershell. O primeiro token de
-# cada estagio do pipeline precisa comecar com um destes verbos seguros.
-# Qualquer coisa fora disso (Stop-, Remove-, Set-, Start-, Invoke-, New-,
-# redirecionamento de arquivo, chamada de .exe arbitrario) e recusada.
+# Allowlist of read-only cmdlets for run_powershell. The first token of each
+# pipeline stage must start with one of these safe verbs. Anything else
+# (Stop-, Remove-, Set-, Start-, Invoke-, New-, redirecting to a file,
+# calling an arbitrary .exe) is rejected.
 _SAFE_VERB_PREFIXES = ("get-", "measure-", "select-", "sort-", "where-",
                        "format-", "group-")
 _BLOCKED_PATTERNS = re.compile(
@@ -72,11 +74,11 @@ _BLOCKED_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-# Extensao (18/11/2026): libera, e so isso, o pipeline do ccusage.
-#  - 1o estagio pode ser exatamente "npx ccusage@latest [--flags]"
-#  - estagio "ConvertFrom-Json" sem argumentos
-#  - estagio "ForEach-Object" apenas com blocos { } contendo variaveis,
-#    numeros e operadores aritmeticos (sem comandos, chamadas ou strings)
+# Extension: allows, and only this, the ccusage pipeline.
+#  - 1st stage can be exactly "npx ccusage@latest [--flags]"
+#  - a "ConvertFrom-Json" stage with no arguments
+#  - a "ForEach-Object" stage with only { } blocks containing variables,
+#    numbers and arithmetic operators (no commands, calls or strings)
 _NPX_RE = re.compile(r"^npx\s+ccusage@latest(\s+-{0,2}[A-Za-z][\w\-]*)*$", re.IGNORECASE)
 _CCUSAGE_CMD = r"D:\hermes-work\tools\ccusage\node_modules\.bin\ccusage.cmd"
 _CCUSAGE_RE = re.compile(r"^ccusage(\s+-{0,2}[A-Za-z][\w\-]*)*$", re.IGNORECASE)
@@ -95,24 +97,24 @@ def _foreach_ok(stage: str) -> bool:
 
 
 # --------------------------------------------------------------------------
-# Processos basicos (tasklist)
+# Basic processes (tasklist)
 # --------------------------------------------------------------------------
 
 @mcp.tool()
 def list_processes() -> str:
-    """Lista todos os processos rodando no Windows agora (nome, PID, memoria)."""
+    """List every Windows process running right now (name, PID, memory)."""
     result = subprocess.run(
         ["tasklist", "/FO", "CSV", "/NH"],
         capture_output=True, text=True, encoding="cp850", errors="replace",
     )
-    return result.stdout or result.stderr or "sem saida"
+    return result.stdout or result.stderr or "no output"
 
 
 @mcp.tool()
 def check_process(name: str) -> str:
-    """Verifica se um processo especifico esta rodando (ex: 'CapCut.exe').
+    """Check whether a specific process is running (e.g. 'CapCut.exe').
 
-    Retorna 'STATE=running' ou 'STATE=closed' seguido dos detalhes do tasklist.
+    Returns 'STATE=running' or 'STATE=closed' followed by tasklist's details.
     """
     result = subprocess.run(
         ["tasklist", "/FI", f"IMAGENAME eq {name}", "/FO", "CSV", "/NH"],
@@ -125,22 +127,22 @@ def check_process(name: str) -> str:
 
 @mcp.tool()
 def open_task_manager() -> str:
-    """Abre o Gerenciador de Tarefas do Windows na tela do usuario."""
+    """Opens the Windows Task Manager on the user's screen."""
     subprocess.Popen(["taskmgr.exe"])
-    return "Gerenciador de Tarefas aberto."
+    return "Task Manager opened."
 
 
 # --------------------------------------------------------------------------
-# PowerShell read-only
+# Read-only PowerShell
 # --------------------------------------------------------------------------
 
 def _validate_readonly_powershell(cmd: str) -> str | None:
-    """Retorna None se o comando e seguro, ou uma mensagem de erro."""
+    """Returns None if the command is safe, or an error message."""
     if _BLOCKED_PATTERNS.search(cmd):
-        return "Bloqueado: comando contem verbo/padrao perigoso (Stop-, Remove-, Set-, Invoke-, etc.)."
+        return "Blocked: command contains a dangerous verb/pattern (Stop-, Remove-, Set-, Invoke-, etc.)."
     stages = [s.strip() for s in cmd.split("|") if s.strip()]
     if not stages:
-        return "Bloqueado: comando vazio."
+        return "Blocked: empty command."
     for i, stage in enumerate(stages):
         first_word = stage.split()[0].lower()
         if i == 0 and (_NPX_RE.match(stage) or _CCUSAGE_RE.match(stage)):
@@ -150,11 +152,11 @@ def _validate_readonly_powershell(cmd: str) -> str | None:
         if first_word == "foreach-object":
             if _foreach_ok(stage):
                 continue
-            return ("Bloqueado: ForEach-Object so aceita blocos com variaveis, "
-                    "numeros e operadores aritmeticos.")
+            return ("Blocked: ForEach-Object only accepts blocks with variables, "
+                    "numbers and arithmetic operators.")
         if not any(first_word.startswith(p) for p in _SAFE_VERB_PREFIXES):
             return (
-                f"Bloqueado: '{first_word}' nao esta na allowlist "
+                f"Blocked: '{first_word}' is not in the allowlist "
                 f"({', '.join(_SAFE_VERB_PREFIXES)})."
             )
     return None
@@ -162,15 +164,15 @@ def _validate_readonly_powershell(cmd: str) -> str | None:
 
 @mcp.tool()
 def run_powershell(cmd: str) -> str:
-    """Roda um comando PowerShell SOMENTE LEITURA (allowlist: Get-, Measure-,
-    Select-, Sort-, Where-, Format-, Group-). Qualquer verbo que altere
-    estado (Stop-, Remove-, Set-, Start-, Invoke-, New-) e recusado antes
-    de executar. Ex: 'Get-Process | Sort-Object CPU -Descending | Select-Object -First 5'
+    """Runs a READ-ONLY PowerShell command (allowlist: Get-, Measure-,
+    Select-, Sort-, Where-, Format-, Group-). Any verb that changes state
+    (Stop-, Remove-, Set-, Start-, Invoke-, New-) is rejected before it
+    runs. Ex: 'Get-Process | Sort-Object CPU -Descending | Select-Object -First 5'
     """
     error = _validate_readonly_powershell(cmd)
     if error:
         return error
-    # npx.ps1 e barrado pela ExecutionPolicy; o shim npx.cmd nao e script PowerShell.
+    # npx.ps1 is blocked by ExecutionPolicy; the npx.cmd shim isn't a PowerShell script.
     exec_cmd = re.sub(r"^\s*npx(\s)", r"npx.cmd\1", cmd, count=1, flags=re.IGNORECASE)
     exec_cmd = re.sub(r"^\s*ccusage(\s|$)", lambda m: _CCUSAGE_CMD + m.group(1), exec_cmd,
                       count=1, flags=re.IGNORECASE)
@@ -179,24 +181,24 @@ def run_powershell(cmd: str) -> str:
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         timeout=120 if (_NPX_RE.match(cmd.split("|")[0].strip()) or _CCUSAGE_RE.match(cmd.split("|")[0].strip())) else 30,
     )
-    return result.stdout or result.stderr or "sem saida"
+    return result.stdout or result.stderr or "no output"
 
 
 @mcp.tool()
 def run_powershell_readonly(cmd: str) -> str:
-    """Alias de run_powershell: cmdlet PowerShell so-leitura, mesma allowlist."""
+    """Alias of run_powershell: read-only PowerShell cmdlet, same allowlist."""
     return run_powershell(cmd)
 
 
 # --------------------------------------------------------------------------
-# Estatisticas via psutil
+# Stats via psutil
 # --------------------------------------------------------------------------
 
 @mcp.tool()
 def get_process_stats(sort_by: str = "cpu", top: int = 10) -> str:
-    """CPU (%), RAM (MB) e threads por processo, ordenado.
+    """CPU (%), RAM (MB) and threads per process, sorted.
 
-    sort_by: 'cpu', 'mem' ou 'threads'. top: quantos processos retornar.
+    sort_by: 'cpu', 'mem' or 'threads'. top: how many processes to return.
     """
     rows = []
     for p in psutil.process_iter(["pid", "name", "memory_info", "num_threads"]):
@@ -208,7 +210,7 @@ def get_process_stats(sort_by: str = "cpu", top: int = 10) -> str:
             continue
     key = {"cpu": 2, "mem": 3, "threads": 4}.get(sort_by, 2)
     rows.sort(key=lambda r: r[key], reverse=True)
-    lines = ["nome,pid,cpu_%,ram_mb,threads"]
+    lines = ["name,pid,cpu_%,ram_mb,threads"]
     for name, pid, cpu, mem_mb, threads in rows[:top]:
         lines.append(f"{name},{pid},{cpu:.1f},{mem_mb:.1f},{threads}")
     return "\n".join(lines)
@@ -216,7 +218,7 @@ def get_process_stats(sort_by: str = "cpu", top: int = 10) -> str:
 
 @mcp.tool()
 def list_processes_grouped() -> str:
-    """Soma de RAM e contagem de instancias por nome de processo (ex: Chrome)."""
+    """Total RAM and instance count per process name (e.g. Chrome)."""
     groups: dict[str, list[float]] = {}
     for p in psutil.process_iter(["name", "memory_info"]):
         try:
@@ -228,7 +230,7 @@ def list_processes_grouped() -> str:
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
     rows = sorted(groups.items(), key=lambda kv: kv[1][0], reverse=True)
-    lines = ["nome,ram_total_mb,instancias"]
+    lines = ["name,total_ram_mb,instances"]
     for name, (mem_total, count) in rows:
         lines.append(f"{name},{mem_total:.1f},{count}")
     return "\n".join(lines)
@@ -236,19 +238,19 @@ def list_processes_grouped() -> str:
 
 @mcp.tool()
 def system_snapshot() -> str:
-    """RAM, CPU e disco do sistema numa unica chamada."""
+    """RAM, CPU and disk of the system in a single call."""
     vm = psutil.virtual_memory()
     cpu_pct = psutil.cpu_percent(interval=0.5)
     lines = [
         f"CPU: {cpu_pct:.1f}%",
-        f"RAM: {vm.used / (1024**3):.1f} GB usados de {vm.total / (1024**3):.1f} GB ({vm.percent:.1f}%)",
-        "Discos:",
+        f"RAM: {vm.used / (1024**3):.1f} GB used of {vm.total / (1024**3):.1f} GB ({vm.percent:.1f}%)",
+        "Disks:",
     ]
     for part in psutil.disk_partitions(all=False):
         try:
             u = psutil.disk_usage(part.mountpoint)
             lines.append(
-                f"  {part.device} {u.used / (1024**3):.1f} GB usados de "
+                f"  {part.device} {u.used / (1024**3):.1f} GB used of "
                 f"{u.total / (1024**3):.1f} GB ({u.percent:.1f}%)"
             )
         except (PermissionError, OSError):
@@ -258,7 +260,7 @@ def system_snapshot() -> str:
 
 @mcp.tool()
 def gpu_status() -> str:
-    """Uso de GPU e VRAM via nvidia-smi (NVIDIA apenas)."""
+    """GPU and VRAM usage via nvidia-smi (NVIDIA only)."""
     result = subprocess.run(
         ["nvidia-smi",
          "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu",
@@ -266,31 +268,32 @@ def gpu_status() -> str:
         capture_output=True, text=True, errors="replace", timeout=10,
     )
     if result.returncode != 0:
-        return f"nvidia-smi indisponivel: {result.stderr.strip() or 'sem GPU NVIDIA'}"
-    return result.stdout.strip() or "sem saida"
+        return f"nvidia-smi unavailable: {result.stderr.strip() or 'no NVIDIA GPU'}"
+    return result.stdout.strip() or "no output"
 
 
 # --------------------------------------------------------------------------
-# Controle de processos (requer confirm explicito para a parte destrutiva)
+# Process control (requires explicit confirm for the destructive part)
 # --------------------------------------------------------------------------
 
 @mcp.tool()
 def start_process(target: str) -> str:
-    """Abre um aplicativo pelo nome (ex: 'notepad') ou caminho completo do .exe."""
+    """Opens an application by name (e.g. 'notepad') or full .exe path."""
     try:
         subprocess.Popen(target, shell=True)
-        return f"Comando de abertura enviado para: {target}"
+        return f"Launch command sent for: {target}"
     except Exception as e:
-        return f"Erro ao abrir '{target}': {e}"
+        return f"Error opening '{target}': {e}"
 
 
 @mcp.tool()
 def kill_process(pid: int = 0, name: str = "", confirm: bool = False) -> str:
-    """Encerra um processo por PID ou nome. Exige confirm=True (defesa extra
-    alem da tela de permissao do Claude) - sem isso, so simula e nao mata nada.
+    """Terminates a process by PID or name. Requires confirm=True (extra
+    defense beyond Claude's own permission screen) - without it, it only
+    simulates and kills nothing.
     """
     if not confirm:
-        return "Nao executado: passe confirm=True para realmente encerrar o processo."
+        return "Not executed: pass confirm=True to actually terminate the process."
     if pid:
         result = subprocess.run(["taskkill", "/F", "/PID", str(pid)],
                                  capture_output=True, text=True, encoding="cp850", errors="replace")
@@ -298,21 +301,21 @@ def kill_process(pid: int = 0, name: str = "", confirm: bool = False) -> str:
         result = subprocess.run(["taskkill", "/F", "/IM", name],
                                  capture_output=True, text=True, encoding="cp850", errors="replace")
     else:
-        return "Informe pid ou name."
-    return result.stdout or result.stderr or "sem saida"
+        return "Provide pid or name."
+    return result.stdout or result.stderr or "no output"
 
 
 # --------------------------------------------------------------------------
-# Servicos, inicializacao e disco
+# Services, startup and disk
 # --------------------------------------------------------------------------
 
 @mcp.tool()
 def list_services(name_filter: str = "") -> str:
-    """Lista servicos do Windows e seu estado (running/stopped).
+    """Lists Windows services and their state (running/stopped).
 
-    name_filter opcional: substring do nome do servico (case-insensitive).
+    name_filter is optional: substring of the service name (case-insensitive).
     """
-    lines = ["nome,display_name,status"]
+    lines = ["name,display_name,status"]
     for s in psutil.win_service_iter():
         try:
             info = s.as_dict()
@@ -327,28 +330,28 @@ def list_services(name_filter: str = "") -> str:
 
 @mcp.tool()
 def startup_apps() -> str:
-    """Lista programas configurados para abrir junto com o Windows."""
+    """Lists programs configured to launch together with Windows."""
     result = subprocess.run(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command",
          "Get-CimInstance Win32_StartupCommand | Select-Object Name,Command,Location "
          "| ConvertTo-Csv -NoTypeInformation"],
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
     )
-    return result.stdout or result.stderr or "sem saida"
+    return result.stdout or result.stderr or "no output"
 
 
 @mcp.tool()
 def disk_usage(scan_path: str = "", top: int = 10) -> str:
-    """Espaco livre/usado por unidade. Se scan_path for passado, tambem lista
-    as 'top' maiores subpastas de 1o nivel dentro desse caminho (pode demorar
-    em pastas muito grandes).
+    """Free/used space per drive. If scan_path is given, also lists the
+    'top' largest first-level subfolders inside that path (can take a
+    while on very large folders).
     """
-    lines = ["Unidades:"]
+    lines = ["Drives:"]
     for part in psutil.disk_partitions(all=False):
         try:
             u = psutil.disk_usage(part.mountpoint)
             lines.append(
-                f"  {part.device} livre: {u.free / (1024**3):.1f} GB de "
+                f"  {part.device} free: {u.free / (1024**3):.1f} GB of "
                 f"{u.total / (1024**3):.1f} GB"
             )
         except (PermissionError, OSError):
@@ -356,7 +359,7 @@ def disk_usage(scan_path: str = "", top: int = 10) -> str:
 
     if scan_path:
         if not os.path.isdir(scan_path):
-            lines.append(f"\nscan_path invalido: {scan_path}")
+            lines.append(f"\ninvalid scan_path: {scan_path}")
             return "\n".join(lines)
         sizes = []
         try:
@@ -372,38 +375,39 @@ def disk_usage(scan_path: str = "", top: int = 10) -> str:
                             continue
                 sizes.append((entry.name, total))
         except PermissionError:
-            lines.append(f"\nSem permissao para escanear: {scan_path}")
+            lines.append(f"\nNo permission to scan: {scan_path}")
             return "\n".join(lines)
         sizes.sort(key=lambda x: x[1], reverse=True)
-        lines.append(f"\nMaiores pastas em {scan_path}:")
+        lines.append(f"\nLargest folders in {scan_path}:")
         for name, total in sizes[:top]:
             lines.append(f"  {name}: {total / (1024**3):.2f} GB")
     return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------
-# Arquivos: salvar direto no disco sem o popup "Salvar como" do navegador
+# Files: save straight to disk without the browser's "Save As" popup
 # --------------------------------------------------------------------------
 
 def _safe_dest(dest_path: str, overwrite: bool) -> str | None:
-    """Retorna mensagem de erro, ou None se dest_path pode ser escrito."""
+    """Returns an error message, or None if dest_path can be written to."""
     parent = os.path.dirname(dest_path) or "."
     if not os.path.isdir(parent):
-        return f"Pasta nao existe: {parent}"
+        return f"Folder does not exist: {parent}"
     if os.path.exists(dest_path) and not overwrite:
-        return f"Ja existe: {dest_path} (passe overwrite=True para substituir)."
+        return f"Already exists: {dest_path} (pass overwrite=True to replace)."
     return None
 
 
 @mcp.tool()
 def save_url_to_file(url: str, dest_path: str, overwrite: bool = False) -> str:
-    """Baixa uma URL http(s) direto para dest_path, sem abrir dialogo do navegador.
+    """Downloads an http(s) URL straight to dest_path, without opening the
+    browser's download dialog.
 
-    Nao funciona com URLs blob: (essas so existem dentro da aba do navegador;
-    use save_base64_to_file para esse caso, extraindo o base64 via JS na pagina).
+    Does not work with blob: URLs (those only exist inside the browser tab;
+    use save_base64_to_file for that case, extracting the base64 via page JS).
     """
     if not re.match(r"^https?://", url, re.IGNORECASE):
-        return "Bloqueado: so aceito URL http:// ou https:// (blob: nao e baixavel aqui)."
+        return "Blocked: only http:// or https:// URLs accepted (blob: can't be downloaded here)."
     error = _safe_dest(dest_path, overwrite)
     if error:
         return error
@@ -412,15 +416,16 @@ def save_url_to_file(url: str, dest_path: str, overwrite: bool = False) -> str:
         with urllib.request.urlopen(req, timeout=60) as resp, open(dest_path, "wb") as f:
             f.write(resp.read())
         size = os.path.getsize(dest_path)
-        return f"Salvo: {dest_path} ({size / 1024:.1f} KB)"
+        return f"Saved: {dest_path} ({size / 1024:.1f} KB)"
     except Exception as e:
-        return f"Erro ao baixar '{url}': {e}"
+        return f"Error downloading '{url}': {e}"
 
 
 @mcp.tool()
 def save_base64_to_file(data_b64: str, dest_path: str, overwrite: bool = False) -> str:
-    """Decodifica base64 (ex: extraido de um blob: via JS na pagina, sem o data:URI
-    prefix) e grava em dest_path. Use quando a origem for uma blob: URL do navegador.
+    """Decodes base64 (e.g. extracted from a blob: URL via page JS, without the
+    data:URI prefix) and writes it to dest_path. Use this when the source is
+    a blob: URL in the browser.
     """
     error = _safe_dest(dest_path, overwrite)
     if error:
@@ -431,18 +436,18 @@ def save_base64_to_file(data_b64: str, dest_path: str, overwrite: bool = False) 
         raw = base64.b64decode(data_b64)
         with open(dest_path, "wb") as f:
             f.write(raw)
-        return f"Salvo: {dest_path} ({len(raw) / 1024:.1f} KB)"
+        return f"Saved: {dest_path} ({len(raw) / 1024:.1f} KB)"
     except Exception as e:
-        return f"Erro ao decodificar/gravar '{dest_path}': {e}"
+        return f"Error decoding/writing '{dest_path}': {e}"
 
 
 @mcp.tool()
 def move_file(src: str, dest: str, overwrite: bool = False) -> str:
-    """Move/renomeia um arquivo (ex: do que acabou de cair em Downloads para a
-    pasta certa do projeto). Falha se dest ja existir e overwrite=False.
+    """Moves/renames a file (e.g. from what just landed in Downloads to the
+    right project folder). Fails if dest already exists and overwrite=False.
     """
     if not os.path.isfile(src):
-        return f"Nao encontrado: {src}"
+        return f"Not found: {src}"
     error = _safe_dest(dest, overwrite)
     if error:
         return error
@@ -450,45 +455,46 @@ def move_file(src: str, dest: str, overwrite: bool = False) -> str:
         if overwrite and os.path.exists(dest):
             os.remove(dest)
         os.replace(src, dest)
-        return f"Movido: {src} -> {dest}"
+        return f"Moved: {src} -> {dest}"
     except Exception as e:
-        return f"Erro ao mover '{src}' -> '{dest}': {e}"
+        return f"Error moving '{src}' -> '{dest}': {e}"
 
 
 @mcp.tool()
 def copy_file(src: str, dest: str, overwrite: bool = False) -> str:
-    """Copia um arquivo mantendo o original (ex: duplicar antes de editar)."""
+    """Copies a file while keeping the original (e.g. duplicate before editing)."""
     if not os.path.isfile(src):
-        return f"Nao encontrado: {src}"
+        return f"Not found: {src}"
     error = _safe_dest(dest, overwrite)
     if error:
         return error
     try:
         shutil.copy2(src, dest)
-        return f"Copiado: {src} -> {dest}"
+        return f"Copied: {src} -> {dest}"
     except Exception as e:
-        return f"Erro ao copiar '{src}' -> '{dest}': {e}"
+        return f"Error copying '{src}' -> '{dest}': {e}"
 
 
 @mcp.tool()
 def ensure_dir(path: str) -> str:
-    """Cria a pasta (e as pastas pai necessarias) se ainda nao existir."""
+    """Creates the folder (and any needed parent folders) if it doesn't exist yet."""
     try:
         os.makedirs(path, exist_ok=True)
-        return f"Pasta pronta: {path}"
+        return f"Folder ready: {path}"
     except Exception as e:
-        return f"Erro ao criar '{path}': {e}"
+        return f"Error creating '{path}': {e}"
 
 
 @mcp.tool()
 def list_recent_downloads(minutes: int = 10, pattern: str = "") -> str:
-    """Lista arquivos criados/modificados em Downloads nos ultimos N minutos
-    (para achar o que acabou de ser salvo pelo popup do navegador e mover
-    com move_file). pattern opcional: substring do nome (case-insensitive).
+    """Lists files created/modified in Downloads within the last N minutes
+    (to find what the browser's download popup just saved, so it can be
+    moved with move_file). pattern is optional: substring of the name
+    (case-insensitive).
     """
     downloads = os.path.join(os.path.expanduser("~"), "Downloads")
     if not os.path.isdir(downloads):
-        return f"Pasta nao encontrada: {downloads}"
+        return f"Folder not found: {downloads}"
     cutoff = time.time() - minutes * 60
     rows = []
     for name in os.listdir(downloads):
@@ -502,9 +508,9 @@ def list_recent_downloads(minutes: int = 10, pattern: str = "") -> str:
             continue
         rows.append((mtime, name, path, os.path.getsize(path)))
     if not rows:
-        return f"Nada em {downloads} nos ultimos {minutes} min (filtro: '{pattern}')."
+        return f"Nothing in {downloads} in the last {minutes} min (filter: '{pattern}')."
     rows.sort(reverse=True)
-    lines = [f"Downloads recentes (ultimos {minutes} min):"]
+    lines = [f"Recent downloads (last {minutes} min):"]
     for mtime, name, path, size in rows:
         lines.append(f"  {name}  ({size / 1024:.1f} KB)  {path}")
     return "\n".join(lines)
@@ -512,12 +518,12 @@ def list_recent_downloads(minutes: int = 10, pattern: str = "") -> str:
 
 @mcp.tool()
 def list_dir(path: str, pattern: str = "", top: int = 50) -> str:
-    """Lista arquivos e pastas dentro de 'path' (nao recursivo).
+    """Lists files and folders inside 'path' (non-recursive).
 
-    pattern opcional: substring do nome (case-insensitive). top: limite de linhas.
+    pattern is optional: substring of the name (case-insensitive). top: line limit.
     """
     if not os.path.isdir(path):
-        return f"Pasta nao encontrada: {path}"
+        return f"Folder not found: {path}"
     rows = []
     try:
         for entry in os.scandir(path):
@@ -530,9 +536,9 @@ def list_dir(path: str, pattern: str = "", top: int = 50) -> str:
             except OSError:
                 continue
     except PermissionError:
-        return f"Sem permissao para listar: {path}"
+        return f"No permission to list: {path}"
     rows.sort(reverse=True)
-    lines = [f"{path} ({len(rows)} itens, mais recentes primeiro):"]
+    lines = [f"{path} ({len(rows)} items, most recent first):"]
     for mtime, kind, name, size in rows[:top]:
         size_s = f"{size / 1024:.1f} KB" if kind == "FILE" else "-"
         lines.append(f"  [{kind}] {name}  {size_s}")
@@ -541,14 +547,14 @@ def list_dir(path: str, pattern: str = "", top: int = 50) -> str:
 
 @mcp.tool()
 def delete_file(path: str, confirm: bool = False) -> str:
-    """Manda um arquivo para a Lixeira do Windows (reversivel, nao apaga de vez).
+    """Sends a file to the Windows Recycle Bin (reversible, not a permanent delete).
 
-    Exige confirm=True (defesa extra alem da tela de permissao do Claude).
+    Requires confirm=True (extra defense beyond Claude's own permission screen).
     """
     if not confirm:
-        return "Nao executado: passe confirm=True para realmente enviar a Lixeira."
+        return "Not executed: pass confirm=True to actually send it to the Recycle Bin."
     if not os.path.isfile(path):
-        return f"Nao encontrado: {path}"
+        return f"Not found: {path}"
     try:
         FO_DELETE = 0x0003
         FOF_ALLOWUNDO = 0x0040
@@ -573,17 +579,17 @@ def delete_file(path: str, confirm: bool = False) -> str:
         op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT
         ret = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
         if ret != 0 or op.fAnyOperationsAborted:
-            return f"Falha ao enviar a Lixeira (codigo {ret})."
-        return f"Enviado para a Lixeira: {path}"
+            return f"Failed to send to Recycle Bin (code {ret})."
+        return f"Sent to Recycle Bin: {path}"
     except Exception as e:
-        return f"Erro ao apagar '{path}': {e}"
+        return f"Error deleting '{path}': {e}"
 
 
 @mcp.tool()
 def file_info(path: str) -> str:
-    """Tamanho, data de criacao/modificacao e sha256 de um arquivo."""
+    """Size, creation/modification date and sha256 of a file."""
     if not os.path.isfile(path):
-        return f"Nao encontrado: {path}"
+        return f"Not found: {path}"
     try:
         st = os.stat(path)
         h = hashlib.sha256()
@@ -591,44 +597,44 @@ def file_info(path: str) -> str:
             for chunk in iter(lambda: f.read(1024 * 1024), b""):
                 h.update(chunk)
         return (
-            f"Caminho: {path}\n"
-            f"Tamanho: {st.st_size / 1024:.1f} KB\n"
-            f"Modificado: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st.st_mtime))}\n"
-            f"Criado: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st.st_ctime))}\n"
+            f"Path: {path}\n"
+            f"Size: {st.st_size / 1024:.1f} KB\n"
+            f"Modified: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st.st_mtime))}\n"
+            f"Created: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st.st_ctime))}\n"
             f"SHA256: {h.hexdigest()}"
         )
     except Exception as e:
-        return f"Erro ao ler '{path}': {e}"
+        return f"Error reading '{path}': {e}"
 
 
 @mcp.tool()
 def open_in_explorer(path: str) -> str:
-    """Abre o Windows Explorer com o arquivo ou pasta ja selecionado na tela."""
+    """Opens Windows Explorer with the file or folder already selected on screen."""
     if not os.path.exists(path):
-        return f"Nao encontrado: {path}"
+        return f"Not found: {path}"
     try:
         subprocess.Popen(["explorer", "/select,", os.path.abspath(path)])
-        return f"Explorer aberto em: {path}"
+        return f"Explorer opened at: {path}"
     except Exception as e:
-        return f"Erro ao abrir Explorer: {e}"
+        return f"Error opening Explorer: {e}"
 
 
 # --------------------------------------------------------------------------
-# Clipboard: salvar imagem/texto copiados sem passar por download algum
+# Clipboard: save copied image/text without any download at all
 # --------------------------------------------------------------------------
 
 def _bitmapfileheader(dib_size: int) -> bytes:
-    # BITMAPFILEHEADER (14 bytes): 'BM', tamanho total, reservado, offset dos pixels.
-    # DIB vindo do clipboard sempre comeca com BITMAPINFOHEADER (40 bytes).
+    # BITMAPFILEHEADER (14 bytes): 'BM', total size, reserved, pixel data offset.
+    # A DIB coming from the clipboard always starts with a BITMAPINFOHEADER (40 bytes).
     offset = 14 + 40
     return struct.pack("<2sIHHI", b"BM", 14 + dib_size, 0, 0, offset)
 
 
 @mcp.tool()
 def save_clipboard_image(dest_path: str, overwrite: bool = False) -> str:
-    """Salva como .bmp a imagem que estiver no clipboard (ex: apos Ctrl+C numa
-    imagem no navegador, sem precisar do dialogo 'Salvar como'). dest_path deve
-    terminar em .bmp.
+    """Saves as .bmp whatever image is currently on the clipboard (e.g. after
+    Ctrl+C on an image in the browser, without needing the 'Save As' dialog).
+    dest_path must end in .bmp.
     """
     error = _safe_dest(dest_path, overwrite)
     if error:
@@ -637,7 +643,7 @@ def save_clipboard_image(dest_path: str, overwrite: bool = False) -> str:
         win32clipboard.OpenClipboard()
         try:
             if not win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_DIB):
-                return "Clipboard nao tem imagem (formato CF_DIB ausente). Copie a imagem (Ctrl+C) primeiro."
+                return "Clipboard has no image (CF_DIB format missing). Copy the image (Ctrl+C) first."
             dib = win32clipboard.GetClipboardData(win32clipboard.CF_DIB)
         finally:
             win32clipboard.CloseClipboard()
@@ -645,29 +651,29 @@ def save_clipboard_image(dest_path: str, overwrite: bool = False) -> str:
         with open(dest_path, "wb") as f:
             f.write(header)
             f.write(dib)
-        return f"Salvo: {dest_path} ({len(dib) / 1024:.1f} KB, .bmp)"
+        return f"Saved: {dest_path} ({len(dib) / 1024:.1f} KB, .bmp)"
     except Exception as e:
-        return f"Erro ao salvar imagem do clipboard: {e}"
+        return f"Error saving clipboard image: {e}"
 
 
 @mcp.tool()
 def get_clipboard_text() -> str:
-    """Le o texto atual do clipboard do Windows."""
+    """Reads the current Windows clipboard text."""
     try:
         win32clipboard.OpenClipboard()
         try:
             if not win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_UNICODETEXT):
-                return "Clipboard nao tem texto no momento."
+                return "Clipboard has no text right now."
             return win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
         finally:
             win32clipboard.CloseClipboard()
     except Exception as e:
-        return f"Erro ao ler clipboard: {e}"
+        return f"Error reading clipboard: {e}"
 
 
 @mcp.tool()
 def set_clipboard_text(text: str) -> str:
-    """Escreve um texto no clipboard do Windows (para colar manualmente depois)."""
+    """Writes text to the Windows clipboard (to paste manually later)."""
     try:
         win32clipboard.OpenClipboard()
         try:
@@ -675,14 +681,14 @@ def set_clipboard_text(text: str) -> str:
             win32clipboard.SetClipboardData(win32clipboard.CF_UNICODETEXT, text)
         finally:
             win32clipboard.CloseClipboard()
-        return f"Clipboard atualizado ({len(text)} caracteres)."
+        return f"Clipboard updated ({len(text)} characters)."
     except Exception as e:
-        return f"Erro ao escrever no clipboard: {e}"
+        return f"Error writing to clipboard: {e}"
 
 
 # --------------------------------------------------------------------------
-# Upload server: pagina manda bytes via fetch POST direto pro disco, sem
-# o base64 passar pelo contexto do chat (resolve imagem grande/video do Flow)
+# Upload server: a page sends bytes via fetch POST straight to disk, without
+# the base64 going through the chat context (solves large image/video on Flow)
 # --------------------------------------------------------------------------
 
 _upload_lock = threading.Lock()
@@ -700,7 +706,7 @@ _upload_state = {
 
 class _UploadHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        pass  # silencia o log padrao do http.server
+        pass  # silence http.server's default logging
 
     def _origin(self):
         return self.headers.get("Origin", "")
@@ -730,14 +736,14 @@ class _UploadHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self._origin().rstrip("/") not in _upload_state["allowed_origins"]:
-            self._reply(403, {"error": "origem nao autorizada (CORS)"})
+            self._reply(403, {"error": "origin not allowed (CORS)"})
             return
         if self.headers.get("X-Upload-Token", "") != _upload_state["token"]:
-            self._reply(401, {"error": "token invalido"})
+            self._reply(401, {"error": "invalid token"})
             return
         parsed = urlparse(self.path)
         if parsed.path != "/upload":
-            self._reply(404, {"error": "rota desconhecida, use /upload"})
+            self._reply(404, {"error": "unknown route, use /upload"})
             return
         qs = parse_qs(parsed.query)
         name = os.path.basename(qs.get("name", ["upload.bin"])[0]) or "upload.bin"
@@ -748,18 +754,18 @@ class _UploadHandler(http.server.BaseHTTPRequestHandler):
             length = 0
         max_bytes = _upload_state["max_bytes"]
         if length <= 0 or length > max_bytes:
-            self._reply(413, {"error": f"tamanho invalido ou acima do limite ({max_bytes} bytes)"})
+            self._reply(413, {"error": f"invalid size or above the limit ({max_bytes} bytes)"})
             return
         dest_path = os.path.join(_upload_state["dest_dir"], name)
         if os.path.exists(dest_path) and not overwrite:
-            self._reply(409, {"error": "arquivo ja existe (use ?overwrite=1)"})
+            self._reply(409, {"error": "file already exists (use ?overwrite=1)"})
             return
         data = self.rfile.read(length)
         try:
             with open(dest_path, "wb") as f:
                 f.write(data)
         except OSError as e:
-            self._reply(500, {"error": f"falha ao gravar: {e}"})
+            self._reply(500, {"error": f"failed to write: {e}"})
             return
         _upload_state["log"].append((time.time(), dest_path, length))
         self._reply(200, {"ok": True, "path": dest_path, "bytes": length})
@@ -768,23 +774,23 @@ class _UploadHandler(http.server.BaseHTTPRequestHandler):
 @mcp.tool()
 def start_upload_server(dest_dir: str, allowed_origins: str = "https://labs.google,https://flow.google.com",
                          port: int = 0, max_mb: int = 500) -> str:
-    """Sobe um servidor HTTP so em 127.0.0.1 pra receber upload direto de uma
-    pagina via fetch(blob) POST, sem o conteudo passar pelo seu contexto de
-    chat. Use quando save_url_to_file falhar por falta de cookies de sessao,
-    ou o arquivo for grande demais pra ir em base64 (imagem em tamanho real,
-    video, Reel).
+    """Starts an HTTP server bound only to 127.0.0.1 to receive an upload
+    directly from a web page via fetch(blob) POST, without the content going
+    through your chat context. Use this when save_url_to_file fails due to
+    missing session cookies, or the file is too large for base64 (full-size
+    image, video, Reel).
 
-    Retorna a porta, o token (header X-Upload-Token) e um snippet de JS pronto
-    pra rodar na pagina. allowed_origins: lista separada por virgula dos
-    http(s)://dominio (sem barra final) que podem fazer POST (CORS); so eles
-    conseguem subir arquivo, e mesmo assim precisam do token certo.
+    Returns the port, the token (X-Upload-Token header) and a ready-to-run JS
+    snippet for the page. allowed_origins: comma-separated list of
+    http(s)://domain (no trailing slash) allowed to POST (CORS); only those
+    origins can upload a file, and even then they need the right token.
     """
     if not os.path.isdir(dest_dir):
-        return f"Pasta nao existe: {dest_dir}"
+        return f"Folder does not exist: {dest_dir}"
     with _upload_lock:
         if _upload_state["httpd"] is not None:
-            return (f"Ja rodando na porta {_upload_state['port']}, destino "
-                     f"{_upload_state['dest_dir']}. Chame stop_upload_server() antes de subir outro.")
+            return (f"Already running on port {_upload_state['port']}, destination "
+                     f"{_upload_state['dest_dir']}. Call stop_upload_server() before starting another.")
         token = secrets.token_urlsafe(24)
         origins = {o.strip().rstrip("/") for o in allowed_origins.split(",") if o.strip()}
         httpd = http.server.ThreadingHTTPServer(("127.0.0.1", port), _UploadHandler)
@@ -798,47 +804,47 @@ def start_upload_server(dest_dir: str, allowed_origins: str = "https://labs.goog
         _upload_state["thread"] = thread
         thread.start()
     snippet = (
-        "fetch('http://127.0.0.1:%d/upload?name=SEUARQUIVO.jpg', {\n"
+        "fetch('http://127.0.0.1:%d/upload?name=YOURFILE.jpg', {\n"
         "  method: 'POST',\n"
         "  headers: {'X-Upload-Token': '%s'},\n"
-        "  body: blob  // Blob/File/ArrayBuffer do que voce quer salvar\n"
+        "  body: blob  // Blob/File/ArrayBuffer of what you want to save\n"
         "}).then(r => r.json()).then(console.log)"
     ) % (actual_port, token)
     return (
-        f"Servidor de upload no ar: http://127.0.0.1:{actual_port}/upload\n"
-        f"Origens liberadas: {', '.join(sorted(origins)) or '(nenhuma - nada vai passar)'}\n"
-        f"Token (header X-Upload-Token): {token}\n"
-        f"Limite por arquivo: {max_mb} MB\n"
-        f"Pasta destino: {dest_dir}\n\n"
-        f"Snippet pra rodar como JS na pagina:\n{snippet}"
+        f"Upload server up: http://127.0.0.1:{actual_port}/upload\n"
+        f"Allowed origins: {', '.join(sorted(origins)) or '(none - nothing will go through)'}\n"
+        f"Token (X-Upload-Token header): {token}\n"
+        f"Per-file limit: {max_mb} MB\n"
+        f"Destination folder: {dest_dir}\n\n"
+        f"Snippet to run as JS on the page:\n{snippet}"
     )
 
 
 @mcp.tool()
 def stop_upload_server() -> str:
-    """Derruba o servidor de upload iniciado por start_upload_server."""
+    """Tears down the upload server started by start_upload_server."""
     with _upload_lock:
         httpd = _upload_state["httpd"]
         if httpd is None:
-            return "Nenhum servidor de upload rodando."
+            return "No upload server running."
         port = _upload_state["port"]
         httpd.shutdown()
         httpd.server_close()
         _upload_state.update({"httpd": None, "thread": None, "port": None, "token": None,
                                "dest_dir": None, "allowed_origins": set(), "max_bytes": 0, "log": []})
-    return f"Servidor de upload (porta {port}) encerrado."
+    return f"Upload server (port {port}) shut down."
 
 
 @mcp.tool()
 def upload_server_status() -> str:
-    """Mostra se o servidor de upload esta rodando e os uploads recebidos nesta sessao."""
+    """Shows whether the upload server is running and the uploads received this session."""
     with _upload_lock:
         if _upload_state["httpd"] is None:
-            return "Parado."
+            return "Stopped."
         lines = [
-            f"Rodando em 127.0.0.1:{_upload_state['port']}, destino: {_upload_state['dest_dir']}",
-            f"Origens: {', '.join(sorted(_upload_state['allowed_origins'])) or '(nenhuma)'}",
-            f"Uploads recebidos: {len(_upload_state['log'])}",
+            f"Running on 127.0.0.1:{_upload_state['port']}, destination: {_upload_state['dest_dir']}",
+            f"Origins: {', '.join(sorted(_upload_state['allowed_origins'])) or '(none)'}",
+            f"Uploads received: {len(_upload_state['log'])}",
         ]
         for ts, path, size in _upload_state["log"][-20:]:
             lines.append(f"  {time.strftime('%H:%M:%S', time.localtime(ts))}  {path}  ({size / 1024:.1f} KB)")
