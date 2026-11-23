@@ -1,74 +1,74 @@
-# putinha-faz-tudo (ex Windows Process Bridge MCP)
+# putinha-faz-tudo (formerly Windows Process Bridge MCP)
 
-> Servidor MCP (Model Context Protocol) local que dá a um cliente de IA como o Claude Desktop acesso real a processos, serviços, arquivos, clipboard e um servidor de upload do Windows — sem controle de mouse/tela e sem sandbox de VM.
+> A local MCP (Model Context Protocol) server that gives an AI client like Claude Desktop real access to Windows processes, services, files, clipboard and an upload server — without controlling the mouse or screen, and without a VM sandbox.
 
-A maioria dos assistentes de IA desktop roda numa VM sandboxed (sem acesso real ao SO) ou cai pra controle de mouse/tela pra checar algo tão simples quanto "esse app está rodando". Esse servidor expõe isso direto, como tool calls de verdade, com design safety-first: operações de leitura são livres, operações que mudam estado exigem `confirm=True` explícito mais a tela de permissão do próprio cliente, e PowerShell arbitrário é bloqueado por uma allowlist de verbos só-leitura (`Get-`, `Measure-`, `Select-`, `Sort-`, `Where-`, `Format-`, `Group-`). Qualquer tentativa de rodar `Stop-`, `Remove-`, `Set-`, `Start-`, `Invoke-`, `New-`, ou de redirecionar pra um arquivo/exe, é recusada antes de executar.
+Most AI desktop assistants either run in a sandboxed cloud VM (no real OS access) or fall back to screen/mouse control to check something as simple as "is this app running". This server exposes that directly, as proper tool calls, with a safety-first design: read operations are unrestricted, state-changing operations require an explicit `confirm=True` plus the client's own permission prompt, and arbitrary PowerShell is blocked by an allowlist of read-only verbs (`Get-`, `Measure-`, `Select-`, `Sort-`, `Where-`, `Format-`, `Group-`). Any attempt to run `Stop-`, `Remove-`, `Set-`, `Start-`, `Invoke-`, `New-`, or to redirect into a file/exe, is rejected before it ever executes.
 
-## 🧰 O que ele dá pro seu cliente de IA
+## 🧰 What it gives your AI client
 
-**Processos e sistema** (lote original)
-- `list_processes` / `check_process(name)` / `open_task_manager` — visibilidade de processo sem mouse
-- `run_powershell(cmd)` / `run_powershell_readonly(cmd)` — qualquer one-liner/pipeline PowerShell só-leitura, allowlist-enforced
-- `get_process_stats`, `list_processes_grouped`, `system_snapshot`, `gpu_status` — CPU/RAM/VRAM/disco, via `psutil` e `nvidia-smi`
-- `start_process(target)` / `kill_process(pid, name, confirm=True)` — abrir ou encerrar, com ação destrutiva atrás de confirm explícito
-- `list_services`, `startup_apps`, `disk_usage` — serviços do Windows, programas de inicialização e maiores pastas
+**Processes & system** (original batch)
+- `list_processes` / `check_process(name)` / `open_task_manager` — basic process visibility, no mouse needed
+- `run_powershell(cmd)` / `run_powershell_readonly(cmd)` — any read-only PowerShell one-liner or pipeline, allowlist-enforced
+- `get_process_stats`, `list_processes_grouped`, `system_snapshot`, `gpu_status` — CPU/RAM/VRAM/disk at a glance, via `psutil` and `nvidia-smi`
+- `start_process(target)` / `kill_process(pid, name, confirm=True)` — launch or terminate, with destructive actions gated behind an explicit confirm flag
+- `list_services`, `startup_apps`, `disk_usage` — Windows services, startup programs and largest folders
 
-**Arquivos** (salvar direto no disco, sem o popup "Salvar como" do navegador)
-- `save_url_to_file(url, dest_path, overwrite=False)` — baixa http(s) direto pro disco
-- `save_base64_to_file(data_b64, dest_path, overwrite=False)` — grava base64 (ex: extraído de uma `blob:` URL via JS na página)
+**Files** (save straight to disk, no browser "Save As" popup)
+- `save_url_to_file(url, dest_path, overwrite=False)` — downloads http(s) straight to disk
+- `save_base64_to_file(data_b64, dest_path, overwrite=False)` — writes base64 (e.g. extracted from a `blob:` URL via page JS)
 - `move_file(src, dest, overwrite=False)` / `copy_file(src, dest, overwrite=False)`
 - `ensure_dir(path)` / `list_dir(path, pattern="", top=50)` / `list_recent_downloads(minutes=10, pattern="")`
-- `delete_file(path, confirm=True)` — manda pra Lixeira via `SHFileOperationW` (reversível, não apaga de vez)
-- `file_info(path)` — tamanho, datas, sha256
-- `open_in_explorer(path)` — abre o Explorer com o item selecionado
+- `delete_file(path, confirm=True)` — sends to the Recycle Bin via `SHFileOperationW` (reversible, not a permanent delete)
+- `file_info(path)` — size, dates, sha256
+- `open_in_explorer(path)` — opens Explorer with the item pre-selected
 
 **Clipboard**
-- `save_clipboard_image(dest_path, overwrite=False)` — salva como `.bmp` a imagem no clipboard (ex: depois de copiar uma imagem no navegador)
+- `save_clipboard_image(dest_path, overwrite=False)` — saves as `.bmp` whatever image is on the clipboard (e.g. after copying an image in the browser)
 - `get_clipboard_text()` / `set_clipboard_text(text)`
 
-**Servidor de upload** (pra arquivo grande/vídeo, sem passar pelo contexto do chat)
-- `start_upload_server(dest_dir, allowed_origins="https://labs.google,https://flow.google.com", port=0, max_mb=500)` — sobe um `http.server.ThreadingHTTPServer` em `127.0.0.1` (porta efêmera), CORS restrito a uma allowlist de origem + token aleatório exigido no header `X-Upload-Token`. A página faz `fetch(blob)` POST direto pro `/upload?name=...`; os bytes vão pro disco sem passar pelo contexto do cliente de IA.
+**Upload server** (for large files/video, without the content going through chat)
+- `start_upload_server(dest_dir, allowed_origins="https://labs.google,https://flow.google.com", port=0, max_mb=500)` — starts an `http.server.ThreadingHTTPServer` on `127.0.0.1` (ephemeral port), CORS restricted to an origin allowlist plus a random token required in the `X-Upload-Token` header. The page does `fetch(blob)` POST straight to `/upload?name=...`; the bytes go to disk without passing through the AI client's chat context.
 - `stop_upload_server()` / `upload_server_status()`
 
-## 🚫 Limitações conhecidas (testadas ao vivo, não suposições)
+## 🚫 Known limitations (tested live, not guesses)
 
-### CDP / `--remote-debugging-port` no Claude Desktop: bloqueado de propósito
+### CDP / `--remote-debugging-port` on Claude Desktop: blocked on purpose
 
-O Claude Desktop é um app MSIX *full-trust* (Desktop Bridge, não é AppContainer/UWP sandboxed — os dados do usuário vão pra uma pasta normal, não pra `LocalState` virtualizado). Mas o processo principal **recusa iniciar** se a linha de comando contiver qualquer uma de 16 switches de debug/rede (`--remote-debugging-port`, `--inspect`, etc.):
+Claude Desktop is a full-trust MSIX app (Desktop Bridge, not an AppContainer/UWP sandbox — user data lives in a normal folder, not the virtualized `LocalState`). But the main process **refuses to start** if the command line contains any of 16 debug/network-override switches (`--remote-debugging-port`, `--inspect`, etc.):
 
 ```
 Claude: refusing to start — a debugging or network-override switch is present on the command line.
 ```
 
-Só destrava com um token `CLAUDE_CDP_AUTH` assinado (ed25519, chave compilada no app) — só a Anthropic tem a chave privada. Confirmado de forma independente por terceiros:
-- [`bigfnj/desktop-ai-companion`](https://github.com/bigfnj/desktop-ai-companion/blob/master/docs/IDEAS.md) — mesma descoberta via engenharia reversa do `app.asar`.
-- [`RemyMachado/claude-desktop-theme`](https://github.com/RemyMachado/claude-desktop-theme) — lista as 16 switches.
-- [`anthropics/claude-code#89160`](https://github.com/anthropics/claude-code/issues/89160) e [`#92044`](https://github.com/anthropics/claude-code/issues/92044) — devs tentando debugar outros bugs esbarraram no mesmo bloqueio.
+It only unlocks with a signed `CLAUDE_CDP_AUTH` token (ed25519, key compiled into the app) — only Anthropic holds the private key. Independently confirmed by others:
+- [`bigfnj/desktop-ai-companion`](https://github.com/bigfnj/desktop-ai-companion/blob/master/docs/IDEAS.md) — same discovery via `app.asar` reverse engineering.
+- [`RemyMachado/claude-desktop-theme`](https://github.com/RemyMachado/claude-desktop-theme) — lists the 16 switches.
+- [`anthropics/claude-code#89160`](https://github.com/anthropics/claude-code/issues/89160) and [`#92044`](https://github.com/anthropics/claude-code/issues/92044) — devs debugging other issues hit the same block.
 
-Não é bug, é proteção deliberada contra extração de sessão/token via DevTools. Nenhuma atualização futura do app vai "destravar" isso — não vale a pena tentar de novo.
+This isn't a bug, it's a deliberate protection against session/token extraction via DevTools. No future app update will "unlock" this — not worth trying again.
 
-### Painel de navegador embutido do Claude Desktop tem comportamento próprio
+### Claude Desktop's embedded browser pane has its own quirks
 
-- `save_url_to_file` só funciona com URL http(s) pública, sem exigir cookie de sessão — falha com HTTP 400 em URLs que exigem auth (ex: Google Flow).
-- `save_base64_to_file` funciona, mas o base64 passa pelo contexto do chat — viável só pra arquivo pequeno (testado ok ~200 KB).
-- `save_clipboard_image` **não funciona** dentro do painel embutido do Claude Desktop: a página recebe `Write permission denied` ao tentar escrever no clipboard, e o clique direito não abre menu nativo ali (diferente de um Chrome de verdade).
-- `start_upload_server` funciona bem pra **imagem** em tamanho real (testado: 204 KB, HTTP 200, sem popup). Pra **vídeo** falha: `fetch` do `<video>` dá "Failed to fetch", `captureStream` dá `SecurityError: cross-origin data` — o host de vídeo (ex: Flow) serve por um caminho que o JS da página não consegue ler. Isso é limite do lado do site, não do MCP; o caminho que resta é baixar nativo (aceitar o popup) e usar `list_recent_downloads` + `move_file` pra organizar depois.
+- `save_url_to_file` only works with a public http(s) URL that doesn't require a session cookie — fails with HTTP 400 on URLs that need auth (e.g. Google Flow).
+- `save_base64_to_file` works, but the base64 goes through the chat context — only viable for small files (tested OK at ~200 KB).
+- `save_clipboard_image` **does not work** inside Claude Desktop's embedded browser pane: the page gets `Write permission denied` when trying to write to the clipboard, and right-click doesn't open a native menu there (unlike a real Chrome window).
+- `start_upload_server` works well for a full-size **image** (tested: 204 KB, HTTP 200, no popup at all). For **video** it fails: `fetch` on the `<video>` element gives "Failed to fetch", `captureStream` gives `SecurityError: cross-origin data` — the video host (e.g. Flow) serves it through a path the page's JS can't read. That's a limit on the site's side, not the MCP's; the remaining path is a native download (accepting the popup) plus `list_recent_downloads` + `move_file` to organize it afterward.
 
 ## 🚀 Tech Stack
 
 - Python 3.11+
-- [`mcp`](https://pypi.org/project/mcp/) (SDK oficial do Model Context Protocol, `FastMCP`)
-- [`psutil`](https://pypi.org/project/psutil/) pra stats entre processos
-- [`pywin32`](https://pypi.org/project/pywin32/) pra clipboard e Lixeira (`win32clipboard`, `SHFileOperationW`)
+- [`mcp`](https://pypi.org/project/mcp/) (official Model Context Protocol SDK, `FastMCP`)
+- [`psutil`](https://pypi.org/project/psutil/) for cross-process stats
+- [`pywin32`](https://pypi.org/project/pywin32/) for clipboard and Recycle Bin (`win32clipboard`, `SHFileOperationW`)
 - Stdlib `subprocess`, `http.server`, `urllib.request`
 
-## 🛠️ Instalação e desenvolvimento local
+## 🛠️ Installation & Local Development
 
-### Pré-requisitos
+### Prerequisites
 - Windows 10/11
 - Python 3.11+
 
-### Passos
+### Steps
 
 ```
 git clone <repository-url>
@@ -78,49 +78,49 @@ python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 
-python server.py   # roda como servidor MCP stdio, esperando um cliente
+python server.py   # runs as a stdio MCP server, waiting for a client
 ```
 
-### Registrar no Claude Desktop
+### Register it in Claude Desktop
 
-Edite `claude_desktop_config.json` (Settings → Developer → Edit Config) e adicione:
+Edit `claude_desktop_config.json` (Settings → Developer → Edit Config) and add:
 
 ```json
 {
   "mcpServers": {
     "putinha-faz-tudo": {
-      "command": "C:\\caminho\\pro\\.venv\\Scripts\\python.exe",
-      "args": ["C:\\caminho\\pro\\win-process-bridge-mcp\\server.py"]
+      "command": "C:\\path\\to\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\path\\to\\win-process-bridge-mcp\\server.py"]
     }
   }
 }
 ```
 
-Reinicie o Claude Desktop por completo (sair pela bandeja do sistema, não só fechar a janela) pro novo servidor MCP carregar. No primeiro uso de qualquer tool, o cliente mostra sua própria tela de permissão antes de rodar qualquer coisa.
+Restart Claude Desktop completely (quit from the system tray, not just close the window) for the new MCP server to load. On first use of any tool, the client shows its own permission prompt before running anything.
 
-## 📄 Estrutura do projeto
+## 📄 Project Structure
 
 ```
-server.py            Todas as 30 tools num único servidor FastMCP (transporte stdio)
+server.py            All 30 tools in a single FastMCP server (stdio transport)
 requirements.txt      mcp + psutil + pywin32
 ```
 
-## 🔒 Modelo de segurança
+## 🔒 Security Model
 
-| Aspecto | Design |
+| Aspect | Design |
 |---|---|
-| Operações de leitura | Sem restrição (`list_processes`, `system_snapshot`, `gpu_status`, etc.) |
-| PowerShell | Allowlist de verbos só-leitura; regex de bloqueio como segunda camada |
-| Operações destrutivas | `kill_process` e `delete_file` exigem `confirm=True` além da UI de permissão do cliente |
-| Servidor de upload | Só escuta em `127.0.0.1` (nunca `0.0.0.0`), CORS restrito a uma allowlist explícita de origem, e exige um token aleatório por sessão no header — mesmo uma origem liberada não sobe arquivo sem o token certo |
-| Escopo | Só processos/serviços/arquivos explicitamente nomeados na chamada da tool; sem daemon de fundo persistente além do upload server opcional, que o próprio cliente sobe e derruba |
-| Transporte | stdio como processo filho do cliente de IA; o único listener de rede é o upload server opcional, e mesmo esse é efêmero e local |
+| Read operations | Unrestricted (`list_processes`, `system_snapshot`, `gpu_status`, etc.) |
+| PowerShell | Allowlist of read-only verbs only; blocklist regex as a second layer |
+| Destructive ops | `kill_process` and `delete_file` require `confirm=True` in addition to the client's own permission UI |
+| Upload server | Only listens on `127.0.0.1` (never `0.0.0.0`), CORS restricted to an explicit origin allowlist, and requires a random per-session token in the header — even an allowed origin can't upload without the right token |
+| Scope | Only processes/services/files explicitly named by the calling tool call; no persistent background daemon besides the optional upload server, which the client itself starts and stops |
+| Transport | stdio as a child process of the AI client; the only network listener is the optional upload server, and even that is ephemeral and local-only |
 
-Este projeto não tenta fazer sandbox do próprio PowerShell (sem AppContainer, sem token restrito) — a allowlist é uma defesa cooperativa contra uso acidental ou descuidado por um cliente de IA que já deveria se comportar, não uma fronteira de segurança contra um malicioso. Não exponha esse servidor a um chamador não confiável.
+This project does not attempt to sandbox PowerShell execution itself (no AppContainer, no restricted token) — the allowlist is a cooperative guard against accidental or careless use by an AI client that is already supposed to behave, not a security boundary against a malicious one. Don't expose this server to an untrusted caller.
 
 ## License
 
-MIT. Veja [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
 
 ---
 
